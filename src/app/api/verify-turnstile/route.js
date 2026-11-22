@@ -13,7 +13,7 @@ export async function POST(request) {
     }
 
     const secretKey =
-      process.env.CLOUDFLARE_TURNSTILE_SECRET_KEY ||
+      process.env.CF_SECRET_KEY ||
       "1x0000000000000000000000000000000AA";
 
     const formData = new URLSearchParams();

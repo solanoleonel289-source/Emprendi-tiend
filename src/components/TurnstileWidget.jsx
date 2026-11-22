@@ -16,7 +16,7 @@ export function TurnstileWidget({
   const [loadError, setLoadError] = useState(null);
 
   const siteKey =
-    process.env.NEXT_PUBLIC_CLOUDFLARE_TURNSTILE_SITE_KEY ||
+    process.env.NEXT_PUBLIC_CF_SITE_KEY ||
     "3x00000000000000000000FF";
 
   // 1. Cargar el script de Cloudflare Turnstile si aún no está presente
