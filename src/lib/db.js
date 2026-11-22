@@ -2,6 +2,19 @@ import { Pool } from "pg";
 import { NEGOCIOS_DATA } from "./constants.js";
 
 let pool = null;
+let dbOfflineUntil = 0;
+
+export function isDbCircuitBroken() {
+  return Date.now() < dbOfflineUntil;
+}
+
+export function marcarDbOffline(ms = 15000) {
+  dbOfflineUntil = Date.now() + ms;
+}
+
+export function marcarDbOnline() {
+  dbOfflineUntil = 0;
+}
 
 export function getPool() {
   const connectionString = process.env.DATABASE_URL;
@@ -29,11 +42,12 @@ export function getPool() {
       ssl: isLocalhost ? false : { rejectUnauthorized: false },
       max: 10,
       idleTimeoutMillis: 30000,
-      connectionTimeoutMillis: 5000,
+      connectionTimeoutMillis: 2000, // Timeout ágil de 2 segundos para evitar bloquear
     });
 
     pool.on("error", (err) => {
       console.error("[PostgreSQL Pool Error]:", err.message);
+      marcarDbOffline(20000);
     });
   }
 
@@ -41,12 +55,23 @@ export function getPool() {
 }
 
 export async function query(text, params = []) {
+  if (isDbCircuitBroken()) {
+    throw new Error("Base de datos temporalmente fuera de línea (circuit breaker activo)");
+  }
+
   const p = getPool();
   if (!p) {
     throw new Error("DATABASE_URL no está configurada");
   }
-  const result = await p.query(text, params);
-  return { rows: result.rows, rowCount: result.rowCount ?? 0 };
+
+  try {
+    const result = await p.query(text, params);
+    marcarDbOnline();
+    return { rows: result.rows, rowCount: result.rowCount ?? 0 };
+  } catch (err) {
+    marcarDbOffline(15000);
+    throw err;
+  }
 }
 
 // Fallback seed de opiniones iniciales si la BD no está disponible
@@ -119,18 +144,29 @@ const SEED_OPINIONES = {
   ],
 };
 
+const MAPA_SLUG_ID = {
+  "calzado-urbano-pe": 1,
+  "eco-hogar": 2,
+  "tech-soluciones": 3,
+};
+
 export async function buscarNegocioId(slug) {
+  if (!slug) return null;
+  const slugLimpio = slug.trim().slice(0, 80);
+
+  // Optimización: si el slug es conocido y la base de datos está offline, resolver inmediatamente
+  if (isDbCircuitBroken() && MAPA_SLUG_ID[slugLimpio]) {
+    return MAPA_SLUG_ID[slugLimpio];
+  }
+
   try {
     const { rows } = await query(
       "SELECT id FROM negocios WHERE slug = $1",
-      [slug.trim().slice(0, 80)]
+      [slugLimpio]
     );
-    return rows[0] ? rows[0].id : null;
+    return rows[0] ? rows[0].id : (MAPA_SLUG_ID[slugLimpio] || null);
   } catch (err) {
-    if (slug === "calzado-urbano-pe") return 1;
-    if (slug === "eco-hogar") return 2;
-    if (slug === "tech-soluciones") return 3;
-    return null;
+    return MAPA_SLUG_ID[slugLimpio] || null;
   }
 }
 
@@ -232,7 +268,7 @@ export async function obtenerOpinionesAprobadas(slug) {
 }
 
 export async function obtenerSugerencias(visitante) {
-  const visitanteLimpio = visitante.trim().slice(0, 64);
+  const visitanteLimpio = visitante ? visitante.trim().slice(0, 80) : "";
   try {
     const { rows } = await query(
       `WITH preferencia AS (
@@ -261,9 +297,51 @@ export async function obtenerSugerencias(visitante) {
         LIMIT 3`,
       [visitanteLimpio]
     );
-    return rows;
+    if (rows && rows.length > 0) return rows;
   } catch (err) {
-    console.warn("[PostgreSQL] Fallback de sugerencias:", err.message);
+    // Modo offline / fallback basado en eventos locales
+  }
+
+  try {
+    const { obtenerEventosPorVisitante } = await import("./telemetria.js");
+    const eventosVisitante = await obtenerEventosPorVisitante(visitanteLimpio);
+
+    const puntosCategoria = {};
+    for (const ev of eventosVisitante) {
+      const cat = ev.negocio_categoria;
+      if (cat) {
+        const peso = ev.tipo === "carrito" ? 3 : 1;
+        puntosCategoria[cat] = (puntosCategoria[cat] || 0) + peso;
+      }
+    }
+
+    const baseNegocios = [
+      {
+        slug: "calzado-urbano-pe",
+        nombre: "Calzado Urbano PE",
+        categoria: "Calzado y Moda",
+        ciudad: "Cajamarca",
+        puntos: puntosCategoria["Calzado y Moda"] || 0,
+      },
+      {
+        slug: "eco-hogar",
+        nombre: "Eco Hogar",
+        categoria: "Artículos del Hogar",
+        ciudad: "Arequipa",
+        puntos: puntosCategoria["Artículos del Hogar"] || 0,
+      },
+      {
+        slug: "tech-soluciones",
+        nombre: "Tech Soluciones",
+        categoria: "Tecnología",
+        ciudad: "Carabayllo",
+        puntos: puntosCategoria["Tecnología"] || 0,
+      },
+    ];
+
+    baseNegocios.sort((a, b) => b.puntos - a.puntos || a.nombre.localeCompare(b.nombre));
+    return baseNegocios;
+  } catch (e) {
     return [
       {
         slug: "calzado-urbano-pe",

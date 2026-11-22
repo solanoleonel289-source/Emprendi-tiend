@@ -1,5 +1,9 @@
-import { query } from "./db.js";
 import { NEGOCIOS_DATA } from "./constants.js";
+import {
+  obtenerEstadisticasAdmin as obtenerStatsAdminTelemetria,
+  obtenerEventosPorVisitante,
+  obtenerPopularidadGlobalProductos,
+} from "./telemetria.js";
 
 export function obtenerCatalogoCompleto() {
   const catalogo = [];
@@ -41,7 +45,7 @@ const PESOS_EVENTO = {
 };
 
 export async function analizarTelemetriaCliente(visitante) {
-  const visitanteLimpio = typeof visitante === "string" ? visitante.trim().slice(0, 64) : "";
+  const visitanteLimpio = typeof visitante === "string" ? visitante.trim().slice(0, 80) : "";
   if (!visitanteLimpio) {
     return {
       intereses: [],
@@ -55,16 +59,7 @@ export async function analizarTelemetriaCliente(visitante) {
   }
 
   try {
-    const { rows } = await query(
-      `SELECT e.id, e.tipo, e.producto, e.creado_en, e.duracion_segundos,
-              n.nombre AS negocio_nombre, n.categoria AS negocio_categoria, n.slug AS negocio_slug
-         FROM eventos e
-         JOIN negocios n ON n.id = e.negocio_id
-        WHERE e.visitante = $1
-        ORDER BY e.creado_en DESC
-        LIMIT 100`,
-      [visitanteLimpio]
-    );
+    const rows = await obtenerEventosPorVisitante(visitanteLimpio);
 
     if (!rows || rows.length === 0) {
       return {
@@ -94,11 +89,9 @@ export async function analizarTelemetriaCliente(visitante) {
       const duracionSegundos = Number(ev.duracion_segundos) || 0;
       let multiplicadorTiempo = 1.0;
       if (duracionSegundos > 0) {
-        
         multiplicadorTiempo = 1.0 + Math.min((duracionSegundos / 10) * 0.5, 3.5);
       }
 
-      
       const antiguedadDias = (ahora - new Date(ev.creado_en).getTime()) / (1000 * 60 * 60 * 24);
       const factorTiempo = 1 / (1 + Math.max(0, antiguedadDias) * 0.15);
       const pesoFinal = (ev.tipo === "tiempo" ? 2.5 : pesoBase) * factorTiempo * multiplicadorTiempo;
@@ -108,8 +101,9 @@ export async function analizarTelemetriaCliente(visitante) {
       const cat = ev.negocio_categoria || "General";
       scoresCategoria[cat] = (scoresCategoria[cat] || 0) + pesoFinal;
 
-      if (ev.negocio_slug) {
-        tiendasFrecuentes[ev.negocio_slug] = (tiendasFrecuentes[ev.negocio_slug] || 0) + pesoFinal;
+      const slugNegocio = ev.negocio_slug || ev.slug;
+      if (slugNegocio) {
+        tiendasFrecuentes[slugNegocio] = (tiendasFrecuentes[slugNegocio] || 0) + pesoFinal;
       }
 
       if (ev.producto) {
@@ -176,21 +170,7 @@ export async function analizarTelemetriaCliente(visitante) {
 
 export async function obtenerPopularidadGlobal() {
   try {
-    const { rows } = await query(
-      `SELECT e.producto, e.tipo, count(*)::int AS conteo
-         FROM eventos e
-        WHERE e.producto IS NOT NULL AND e.producto != ''
-        GROUP BY e.producto, e.tipo`
-    );
-
-    const conteoProductos = {};
-    for (const r of rows) {
-      const nombre = r.producto.toLowerCase().trim();
-      const mult = r.tipo === "carrito" ? 3 : 1;
-      conteoProductos[nombre] = (conteoProductos[nombre] || 0) + r.conteo * mult;
-    }
-
-    return conteoProductos;
+    return await obtenerPopularidadGlobalProductos();
   } catch (err) {
     console.warn("[Minería] Error obteniendo popularidad global:", err.message);
     return {};
@@ -250,7 +230,7 @@ export async function minarRecomendacionesProductos(visitante, limite = 4) {
 
     const yaEnCarrito = perfil.productosVistos.includes(prod.nombre.toLowerCase().trim());
     if (yaEnCarrito) {
-      score -= 3.0; 
+      score -= 3.0;
     }
 
     if (razones.length === 0) {
@@ -276,111 +256,15 @@ export async function minarRecomendacionesProductos(visitante, limite = 4) {
 
 export async function minarEstadisticasAdmin() {
   try {
-    
-    const resTipos = await query(
-      `SELECT e.tipo, count(*)::int AS total
-         FROM eventos e
-        GROUP BY e.tipo
-        ORDER BY total DESC`
-    );
-
-    const resCategorias = await query(
-      `SELECT n.categoria,
-              count(*)::int AS total_interacciones,
-              count(CASE WHEN e.tipo = 'carrito' THEN 1 END)::int AS total_carritos
-         FROM eventos e
-         JOIN negocios n ON n.id = e.negocio_id
-        GROUP BY n.categoria
-        ORDER BY total_interacciones DESC`
-    );
-
-    const resTopProductos = await query(
-      `SELECT e.producto, count(*)::int AS total_carritos
-         FROM eventos e
-        WHERE e.tipo = 'carrito' AND e.producto IS NOT NULL
-        GROUP BY e.producto
-        ORDER BY total_carritos DESC
-        LIMIT 5`
-    );
-
-    const resTiempo = await query(
-      `SELECT COALESCE(ROUND(AVG(duracion_segundos)), 0)::int AS promedio_segundos,
-              COALESCE(SUM(duracion_segundos), 0)::int AS total_segundos,
-              COALESCE(MAX(duracion_segundos), 0)::int AS max_segundos
-         FROM eventos
-        WHERE duracion_segundos > 0`
-    );
-
-    const resTopTiempo = await query(
-      `SELECT e.producto,
-              SUM(e.duracion_segundos)::int AS segundos_totales,
-              ROUND(AVG(e.duracion_segundos))::int AS promedio_segundos,
-              COUNT(*)::int AS total_sesiones
-         FROM eventos e
-        WHERE e.duracion_segundos > 0 AND e.producto IS NOT NULL AND e.producto != ''
-        GROUP BY e.producto
-        ORDER BY segundos_totales DESC
-        LIMIT 5`
-    );
-
-    const resRecientes = await query(
-      `SELECT e.id, e.visitante, e.usuario_nombre, e.tipo, e.producto, e.creado_en, e.duracion_segundos,
-              n.nombre AS negocio_nombre, n.categoria AS negocio_categoria
-         FROM eventos e
-         JOIN negocios n ON n.id = e.negocio_id
-        ORDER BY e.creado_en DESC
-        LIMIT 15`
-    );
-
-    const resUsuarios = await query(
-      `SELECT e.visitante,
-              COALESCE(MAX(e.usuario_nombre), 'Visitante Anónimo') AS nombre_usuario,
-              COALESCE(SUM(e.duracion_segundos), 0)::int AS segundos_totales,
-              COUNT(*)::int AS total_eventos,
-              COUNT(CASE WHEN e.tipo = 'carrito' THEN 1 END)::int AS total_carritos,
-              MAX(e.creado_en) AS ultima_actividad,
-              MIN(e.creado_en) AS primera_visita
-         FROM eventos e
-        GROUP BY e.visitante
-        ORDER BY segundos_totales DESC, total_eventos DESC
-        LIMIT 25`
-    );
-
-    const resDetallePorUsuario = await query(
-      `SELECT e.visitante,
-              e.producto,
-              COALESCE(SUM(e.duracion_segundos), 0)::int AS segundos,
-              COUNT(*)::int AS veces
-         FROM eventos e
-        WHERE e.producto IS NOT NULL AND e.producto != ''
-        GROUP BY e.visitante, e.producto
-        ORDER BY segundos DESC, veces DESC`
-    );
-
-    const mapaDetalle = {};
-    for (const d of resDetallePorUsuario.rows || []) {
-      if (!mapaDetalle[d.visitante]) mapaDetalle[d.visitante] = [];
-      mapaDetalle[d.visitante].push({
-        producto: d.producto,
-        segundos: d.segundos,
-        veces: d.veces,
-      });
-    }
-
-    const tiempoPorUsuario = (resUsuarios.rows || []).map((u) => ({
-      ...u,
-      minutos_totales: Number((u.segundos_totales / 60).toFixed(1)),
-      productos_vistos: mapaDetalle[u.visitante] || [],
-    }));
-
+    const stats = await obtenerStatsAdminTelemetria();
     return {
-      eventosPorTipo: resTipos.rows || [],
-      interesPorCategoria: resCategorias.rows || [],
-      topProductosCarrito: resTopProductos.rows || [],
-      metricasTiempo: resTiempo.rows[0] || { promedio_segundos: 0, total_segundos: 0, max_segundos: 0 },
-      topPermanencia: resTopTiempo.rows || [],
-      eventosRecientes: resRecientes.rows || [],
-      tiempoPorUsuario,
+      eventosPorTipo: stats.eventosPorTipo || [],
+      interesPorCategoria: stats.interesPorCategoria || [],
+      topProductosCarrito: stats.topProductosCarrito || [],
+      metricasTiempo: stats.metricasTiempo || { promedio_segundos: 0, total_segundos: 0, max_segundos: 0 },
+      topPermanencia: stats.topPermanencia || [],
+      eventosRecientes: stats.eventosRecientes || [],
+      tiempoPorUsuario: stats.tiempoPorUsuario || [],
     };
   } catch (err) {
     console.warn("[Minería] Error en estadísticas admin:", err.message);
@@ -388,7 +272,10 @@ export async function minarEstadisticasAdmin() {
       eventosPorTipo: [],
       interesPorCategoria: [],
       topProductosCarrito: [],
+      metricasTiempo: { promedio_segundos: 0, total_segundos: 0, max_segundos: 0 },
+      topPermanencia: [],
       eventosRecientes: [],
+      tiempoPorUsuario: [],
     };
   }
 }

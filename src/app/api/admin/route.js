@@ -3,6 +3,8 @@ import { query } from "@/lib/db";
 import { minarEstadisticasAdmin } from "@/lib/mining";
 import { obtenerAdminDeRequest } from "@/lib/admin-auth";
 
+export const dynamic = "force-dynamic";
+
 export async function GET(req) {
   const admin = obtenerAdminDeRequest(req);
   if (!admin) {
@@ -12,6 +14,11 @@ export async function GET(req) {
     );
   }
 
+  let opinionesRows = [];
+  let reportesRows = [];
+  let solicitudesRows = [];
+  let isOffline = false;
+
   try {
     const opiniones = await query(
       `SELECT o.*, n.nombre AS negocio_nombre, n.slug AS negocio_slug
@@ -20,7 +27,12 @@ export async function GET(req) {
         ORDER BY o.creado_en DESC
         LIMIT 50`
     );
+    opinionesRows = opiniones.rows || [];
+  } catch (e) {
+    isOffline = true;
+  }
 
+  try {
     const reportes = await query(
       `SELECT r.*, n.nombre AS negocio_nombre, n.slug AS negocio_slug
          FROM reportes r
@@ -28,38 +40,31 @@ export async function GET(req) {
         ORDER BY r.creado_en DESC
         LIMIT 50`
     );
+    reportesRows = reportes.rows || [];
+  } catch (e) {
+    isOffline = true;
+  }
 
+  try {
     const solicitudes = await query(
       `SELECT * FROM solicitudes ORDER BY creado_en DESC LIMIT 50`
     );
-
-    const telemetria = await minarEstadisticasAdmin();
-
-    return NextResponse.json({
-      opiniones: opiniones.rows,
-      reportes: reportes.rows,
-      solicitudes: solicitudes.rows,
-      eventos: telemetria.eventosPorTipo,
-      telemetria,
-    });
-  } catch (err) {
-    return NextResponse.json({
-      opiniones: [],
-      reportes: [],
-      solicitudes: [],
-      eventos: [],
-      telemetria: {
-        eventosPorTipo: [],
-        interesPorCategoria: [],
-        topProductosCarrito: [],
-        metricasTiempo: { promedio_segundos: 0, total_segundos: 0, max_segundos: 0 },
-        topPermanencia: [],
-        eventosRecientes: [],
-        tiempoPorUsuario: [],
-      },
-      offline: true,
-    });
+    solicitudesRows = solicitudes.rows || [];
+  } catch (e) {
+    isOffline = true;
   }
+
+  // Cargar telemetría (resiliente: funciona tanto con PostgreSQL como con almacén local)
+  const telemetria = await minarEstadisticasAdmin();
+
+  return NextResponse.json({
+    opiniones: opinionesRows,
+    reportes: reportesRows,
+    solicitudes: solicitudesRows,
+    eventos: telemetria.eventosPorTipo || [],
+    telemetria,
+    offline: isOffline,
+  });
 }
 
 export async function PATCH(req) {
